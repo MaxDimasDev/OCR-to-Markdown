@@ -1,1 +1,5 @@
-docling-core>=1.0.0
+docling-core
+markitdown
+requests
+beautifulsoup4
+pytube

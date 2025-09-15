@@ -1,13 +1,19 @@
 import logging
 import subprocess
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, ttk, scrolledtext
 from pathlib import Path
 import shutil
-import os
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
+import tempfile
+import time
+import os
+import requests
+from bs4 import BeautifulSoup
+import markitdown
+import pytube
+from markdownify import markdownify
 
 # Funciones de utilidad
 def get_supported_extensions():
@@ -18,6 +24,169 @@ def get_supported_extensions():
 
 def ensure_directory_exists(directory):
     Path(directory).mkdir(parents=True, exist_ok=True)
+
+class WebToMarkdownConverter:
+    def __init__(self):
+        self.cancel_requested = False
+        self.executor = ThreadPoolExecutor(max_workers=1)
+    
+    def convert_url(self, url, output_path=None, progress_callback=None):
+        """
+        Convierte una página web a formato Markdown.
+        
+        Args:
+            url: URL de la página web a convertir
+            output_path: Ruta donde guardar el archivo convertido
+            progress_callback: Función para reportar el progreso (0-100)
+            
+        Returns:
+            True si la conversión fue exitosa, False en caso contrario
+        """
+        try:
+            if progress_callback:
+                progress_callback(10)
+                
+            # Determinar si es una URL de YouTube
+            is_youtube = "youtube.com" in url or "youtu.be" in url
+            
+            if is_youtube:
+                return self.convert_youtube(url, output_path, progress_callback)
+            
+            # Preparar la ruta de salida
+            if output_path is None:
+                # Extraer un nombre de archivo de la URL
+                from urllib.parse import urlparse
+                parsed_url = urlparse(url)
+                domain = parsed_url.netloc.replace("www.", "")
+                path = parsed_url.path.strip("/").replace("/", "_")
+                if not path:
+                    path = "index"
+                output_filename = f"{domain}_{path}.md"
+                output_path = str(Path("output_files") / output_filename)
+            
+            ensure_directory_exists(Path(output_path).parent)
+            
+            if progress_callback:
+                progress_callback(20)
+            
+            # Descargar la página web
+            logging.info(f"Descargando: {url}")
+            response = requests.get(url)
+            response.raise_for_status()
+            
+            if progress_callback:
+                progress_callback(50)
+            
+            # Convertir HTML a Markdown usando markdownify
+            logging.info("Convirtiendo HTML a Markdown")
+            markdown_content = markdownify(response.text)
+            
+            if progress_callback:
+                progress_callback(80)
+            
+            # Guardar el resultado
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(markdown_content)
+            
+            if progress_callback:
+                progress_callback(100)
+                
+            logging.info(f"Conversión completada: {output_path}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Error al convertir URL: {e}")
+            return False
+    
+    def convert_youtube(self, url, output_path=None, progress_callback=None):
+        """
+        Convierte un video de YouTube a formato Markdown.
+        
+        Args:
+            url: URL del video de YouTube
+            output_path: Ruta donde guardar el archivo convertido
+            progress_callback: Función para reportar el progreso (0-100)
+            
+        Returns:
+            True si la conversión fue exitosa, False en caso contrario
+        """
+        try:
+            if progress_callback:
+                progress_callback(10)
+            
+            # Preparar la ruta de salida
+            if output_path is None:
+                # Extraer un nombre de archivo de la URL
+                from urllib.parse import urlparse
+                parsed_url = urlparse(url)
+                video_id = parsed_url.query.split('v=')[-1].split('&')[0] if 'v=' in parsed_url.query else parsed_url.path.split('/')[-1]
+                output_filename = f"youtube_{video_id}.md"
+                output_path = str(Path("output_files") / output_filename)
+            
+            ensure_directory_exists(Path(output_path).parent)
+            
+            if progress_callback:
+                progress_callback(30)
+            
+            # Usar pytube para obtener información del video
+            logging.info(f"Procesando video de YouTube: {url}")
+            from pytube import YouTube
+            yt = YouTube(url)
+            
+            if progress_callback:
+                progress_callback(50)
+            
+            # Crear contenido Markdown con la información del video
+            title = yt.title
+            author = yt.author
+            description = yt.description
+            thumbnail_url = yt.thumbnail_url
+            
+            markdown_content = f"# {title}\n\n"
+            markdown_content += f"**Autor:** {author}\n\n"
+            markdown_content += f"**URL:** {url}\n\n"
+            markdown_content += f"![Thumbnail]({thumbnail_url})\n\n"
+            markdown_content += "## Descripción\n\n"
+            markdown_content += description.replace('\n', '\n\n')
+            
+            if progress_callback:
+                progress_callback(80)
+            
+            # Guardar el resultado
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(markdown_content)
+            
+            if progress_callback:
+                progress_callback(100)
+                
+            logging.info(f"Conversión completada: {output_path}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Error al convertir video de YouTube: {e}")
+            return False
+    
+    def convert_url_async(self, url, output_path=None, progress_callback=None, completion_callback=None):
+        """
+        Convierte una URL a Markdown de forma asíncrona.
+        
+        Args:
+            url: URL a convertir
+            output_path: Ruta donde guardar el archivo convertido
+            progress_callback: Función para reportar el progreso
+            completion_callback: Función a llamar cuando se complete la conversión
+        """
+        def task():
+            result = self.convert_url(url, output_path, progress_callback)
+            if completion_callback:
+                completion_callback(result, output_path)
+        
+        return self.executor.submit(task)
+    
+    def cancel_conversion(self):
+        """Cancela la conversión en curso."""
+        self.cancel_requested = True
+
 
 class DoclingToMarkdownConverter:
     def __init__(self):
@@ -252,32 +421,62 @@ class DoclingConverterApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Docling a Markdown Converter")
-        self.root.geometry("600x400")
+        self.root.geometry("700x500")
         self.root.resizable(True, True)
         
         self.converter = DoclingToMarkdownConverter()
+        self.web_converter = WebToMarkdownConverter()
         self.setup_ui()
         self.temp_dir = Path("temp_output")
+        ensure_directory_exists(self.temp_dir)
         self.input_file = None
         self.output_file = None
         self.conversion_in_progress = False
+        self.output_file_path = None
+        self.current_mode = None
         
     def setup_ui(self):
         # Crear frame principal
         main_frame = ttk.Frame(self.root, padding="20")
         main_frame.pack(fill=tk.BOTH, expand=True)
         
+        # Notebook para pestañas
+        self.notebook = ttk.Notebook(main_frame)
+        self.notebook.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        # Pestaña de conversión de archivos
+        file_tab = ttk.Frame(self.notebook, padding="10")
+        self.notebook.add(file_tab, text="Convertir Archivo")
+        
+        # Pestaña de conversión de páginas web
+        web_tab = ttk.Frame(self.notebook, padding="10")
+        self.notebook.add(web_tab, text="Convertir Página Web")
+        
+        # Pestaña de conversión de videos de YouTube
+        youtube_tab = ttk.Frame(self.notebook, padding="10")
+        self.notebook.add(youtube_tab, text="Convertir Video de YouTube")
+        
+        # Configurar pestaña de archivos
+        self.setup_file_tab(file_tab)
+        
+        # Configurar pestaña de páginas web
+        self.setup_web_tab(web_tab)
+        
+        # Configurar pestaña de YouTube
+        self.setup_youtube_tab(youtube_tab)
+    
+    def setup_file_tab(self, parent):
         # Título
-        title_label = ttk.Label(main_frame, text="Convertidor de Documentos a Markdown", font=("Helvetica", 16))
-        title_label.pack(pady=10)
+        title_label = ttk.Label(parent, text="Convertidor de Documentos a Markdown", font=("Helvetica", 14))
+        title_label.pack(pady=5)
         
         # Descripción
-        desc_label = ttk.Label(main_frame, text="Seleccione un archivo para convertirlo a formato Markdown")
+        desc_label = ttk.Label(parent, text="Seleccione un archivo para convertirlo a formato Markdown")
         desc_label.pack(pady=5)
         
         # Frame para selección de archivo
-        file_frame = ttk.Frame(main_frame)
-        file_frame.pack(fill=tk.X, pady=10)
+        file_frame = ttk.Frame(parent)
+        file_frame.pack(fill=tk.X, pady=5)
         
         self.file_path_var = tk.StringVar()
         file_entry = ttk.Entry(file_frame, textvariable=self.file_path_var, width=50)
@@ -288,38 +487,147 @@ class DoclingConverterApp:
         
         # Formatos soportados
         formats_text = "Formatos soportados: " + ", ".join(get_supported_extensions())
-        formats_label = ttk.Label(main_frame, text=formats_text)
+        formats_label = ttk.Label(parent, text=formats_text)
         formats_label.pack(pady=5)
-        
-        # Frame para botones de acción
-        button_frame = ttk.Frame(main_frame)
-        button_frame.pack(fill=tk.X, pady=10)
-        
-        # Botón de conversión
-        self.convert_button = ttk.Button(button_frame, text="Convertir a Markdown", command=self.start_conversion)
-        self.convert_button.pack(side=tk.LEFT, padx=5)
-        
-        # Botón de cancelación (inicialmente deshabilitado)
-        self.cancel_button = ttk.Button(button_frame, text="Cancelar", command=self.cancel_conversion, state=tk.DISABLED)
-        self.cancel_button.pack(side=tk.LEFT, padx=5)
         
         # Barra de progreso
         self.progress_var = tk.DoubleVar()
-        self.progress = ttk.Progressbar(main_frame, variable=self.progress_var, maximum=100)
+        self.progress = ttk.Progressbar(parent, variable=self.progress_var, maximum=100)
         self.progress.pack(fill=tk.X, pady=10)
         
         # Área de estado
         self.status_var = tk.StringVar(value="Listo para convertir")
-        status_label = ttk.Label(main_frame, textvariable=self.status_var)
+        status_label = ttk.Label(parent, textvariable=self.status_var)
         status_label.pack(pady=5)
         
+        # Frame para botones de acción
+        button_frame = ttk.Frame(parent)
+        button_frame.pack(fill=tk.X, pady=5)
+        
+        # Botón de conversión
+        self.convert_button = ttk.Button(button_frame, text="Convertir a Markdown", 
+                                        command=lambda: self.start_conversion("file"))
+        self.convert_button.pack(side=tk.LEFT, padx=5)
+        
+        # Botón de cancelación (inicialmente deshabilitado)
+        self.cancel_button = ttk.Button(button_frame, text="Cancelar", 
+                                       command=lambda: self.cancel_conversion("file"), state=tk.DISABLED)
+        self.cancel_button.pack(side=tk.LEFT, padx=5)
+        
         # Botón de descarga (inicialmente deshabilitado)
-        self.download_button = ttk.Button(main_frame, text="Descargar Markdown", command=self.download_file, state=tk.DISABLED)
-        self.download_button.pack(pady=10)
+        self.download_button = ttk.Button(button_frame, text="Descargar Markdown", 
+                                         command=lambda: self.download_file("file"), state=tk.DISABLED)
+        self.download_button.pack(side=tk.RIGHT, padx=5)
         
         # Información de tiempo estimado
-        self.time_label = ttk.Label(main_frame, text="")
+        self.time_label = ttk.Label(parent, text="")
         self.time_label.pack(pady=5)
+    
+    def setup_web_tab(self, parent):
+        # Título
+        title_label = ttk.Label(parent, text="Convertidor de Páginas Web a Markdown", font=("Helvetica", 14))
+        title_label.pack(pady=5)
+        
+        # Descripción
+        desc_label = ttk.Label(parent, text="Ingrese la URL de la página web para convertirla a formato Markdown")
+        desc_label.pack(pady=5)
+        
+        # Frame para URL
+        url_frame = ttk.Frame(parent)
+        url_frame.pack(fill=tk.X, pady=5)
+        
+        self.web_url_var = tk.StringVar()
+        url_entry = ttk.Entry(url_frame, textvariable=self.web_url_var, width=50)
+        url_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        
+        # Barra de progreso
+        self.web_progress_var = tk.DoubleVar()
+        self.web_progress = ttk.Progressbar(parent, variable=self.web_progress_var, maximum=100)
+        self.web_progress.pack(fill=tk.X, pady=10)
+        
+        # Área de estado
+        self.web_status_var = tk.StringVar(value="Listo para convertir")
+        web_status_label = ttk.Label(parent, textvariable=self.web_status_var)
+        web_status_label.pack(pady=5)
+        
+        # Frame para botones de acción
+        web_button_frame = ttk.Frame(parent)
+        web_button_frame.pack(fill=tk.X, pady=5)
+        
+        # Botón de conversión
+        self.web_convert_button = ttk.Button(web_button_frame, text="Convertir a Markdown", 
+                                           command=lambda: self.start_conversion("web"))
+        self.web_convert_button.pack(side=tk.LEFT, padx=5)
+        
+        # Botón de cancelación (inicialmente deshabilitado)
+        self.web_cancel_button = ttk.Button(web_button_frame, text="Cancelar", 
+                                          command=lambda: self.cancel_conversion("web"), state=tk.DISABLED)
+        self.web_cancel_button.pack(side=tk.LEFT, padx=5)
+        
+        # Botón de descarga (inicialmente deshabilitado)
+        self.web_download_button = ttk.Button(web_button_frame, text="Descargar Markdown", 
+                                            command=lambda: self.download_file("web"), state=tk.DISABLED)
+        self.web_download_button.pack(side=tk.RIGHT, padx=5)
+        
+        # Área de resultados para Web
+        result_frame = ttk.LabelFrame(parent, text="Vista previa")
+        result_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        self.web_result_text = scrolledtext.ScrolledText(result_frame, wrap=tk.WORD, height=15)
+        self.web_result_text.pack(fill=tk.BOTH, expand=True)
+    
+    def setup_youtube_tab(self, parent):
+        # Título
+        title_label = ttk.Label(parent, text="Convertidor de Videos de YouTube a Markdown", font=("Helvetica", 14))
+        title_label.pack(pady=5)
+        
+        # Descripción
+        desc_label = ttk.Label(parent, text="Ingrese la URL del video de YouTube para convertirlo a formato Markdown")
+        desc_label.pack(pady=5)
+        
+        # Frame para URL
+        yt_url_frame = ttk.Frame(parent)
+        yt_url_frame.pack(fill=tk.X, pady=5)
+        
+        self.yt_url_var = tk.StringVar()
+        yt_url_entry = ttk.Entry(yt_url_frame, textvariable=self.yt_url_var, width=50)
+        yt_url_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        
+        # Barra de progreso
+        self.yt_progress_var = tk.DoubleVar()
+        self.yt_progress = ttk.Progressbar(parent, variable=self.yt_progress_var, maximum=100)
+        self.yt_progress.pack(fill=tk.X, pady=10)
+        
+        # Área de estado
+        self.yt_status_var = tk.StringVar(value="Listo para convertir")
+        yt_status_label = ttk.Label(parent, textvariable=self.yt_status_var)
+        yt_status_label.pack(pady=5)
+        
+        # Frame para botones de acción
+        yt_button_frame = ttk.Frame(parent)
+        yt_button_frame.pack(fill=tk.X, pady=5)
+        
+        # Botón de conversión
+        self.yt_convert_button = ttk.Button(yt_button_frame, text="Convertir a Markdown", 
+                                          command=lambda: self.start_conversion("youtube"))
+        self.yt_convert_button.pack(side=tk.LEFT, padx=5)
+        
+        # Botón de cancelación (inicialmente deshabilitado)
+        self.yt_cancel_button = ttk.Button(yt_button_frame, text="Cancelar", 
+                                         command=lambda: self.cancel_conversion("youtube"), state=tk.DISABLED)
+        self.yt_cancel_button.pack(side=tk.LEFT, padx=5)
+        
+        # Botón de descarga (inicialmente deshabilitado)
+        self.yt_download_button = ttk.Button(yt_button_frame, text="Descargar Markdown", 
+                                         command=lambda: self.download_file("youtube"), state=tk.DISABLED)
+        self.yt_download_button.pack(side=tk.RIGHT, padx=5)
+        
+        # Área de resultados para YouTube
+        result_frame = ttk.LabelFrame(parent, text="Vista previa")
+        result_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        self.yt_result_text = scrolledtext.ScrolledText(result_frame, wrap=tk.WORD, height=15)
+        self.yt_result_text.pack(fill=tk.BOTH, expand=True)
     
     def browse_file(self):
         filetypes = [("Documentos", " ".join(["*" + ext for ext in get_supported_extensions()])), ("Todos los archivos", "*.*")]
@@ -362,74 +670,225 @@ class DoclingConverterApp:
         self.root.after(0, lambda: self.convert_button.config(state=tk.NORMAL))
         self.root.after(0, lambda: self.cancel_button.config(state=tk.DISABLED))
     
-    def start_conversion(self):
-        """Inicia la conversión de forma asíncrona"""
-        if not self.file_path_var.get():
-            messagebox.showerror("Error", "Por favor seleccione un archivo para convertir")
-            return
-        
-        input_path = Path(self.file_path_var.get())
-        if not input_path.exists():
-            messagebox.showerror("Error", f"El archivo no existe: {input_path}")
-            return
-        
-        if input_path.suffix.lower() not in get_supported_extensions():
-            messagebox.showerror("Error", f"Formato no soportado: {input_path.suffix}")
-            return
-        
-        # Crear directorio temporal para la salida
-        ensure_directory_exists(self.temp_dir)
-        output_filename = input_path.stem + '.md'
-        output_path = str(self.temp_dir / output_filename)
-        
-        # Actualizar UI
-        self.status_var.set("Convirtiendo documento...")
-        self.progress_var.set(0)
-        self.conversion_in_progress = True
-        
-        # Actualizar estado de los botones
-        self.convert_button.config(state=tk.DISABLED)
-        self.cancel_button.config(state=tk.NORMAL)
-        self.download_button.config(state=tk.DISABLED)
-        
-        # Iniciar conversión asíncrona
-        self.converter.convert_file_async(
-            str(input_path), 
-            output_path, 
-            progress_callback=self.update_progress,
-            completion_callback=self.conversion_completed
-        )
-    
-    def cancel_conversion(self):
-        """Cancela la conversión en curso"""
+    def start_conversion(self, mode="file"):
+        """Inicia el proceso de conversión"""
         if self.conversion_in_progress:
+            return
+        
+        self.current_mode = mode
+        
+        if mode == "file":
+            input_path = self.file_path_var.get()
+            if not input_path:
+                messagebox.showerror("Error", "Por favor seleccione un archivo para convertir")
+                return
+            
+            # Preparar la ruta de salida temporal
+            output_filename = Path(input_path).stem + '.md'
+            self.output_file_path = str(self.temp_dir / output_filename)
+            
+            # Actualizar la interfaz
+            self.conversion_in_progress = True
+            self.convert_button.config(state=tk.DISABLED)
+            self.cancel_button.config(state=tk.NORMAL)
+            self.download_button.config(state=tk.DISABLED)
+            self.progress_var.set(0)
+            self.status_var.set("Iniciando conversión...")
+            
+            # Iniciar la conversión en un hilo separado
+            self.converter.convert_file_async(
+                input_path, 
+                self.output_file_path, 
+                lambda p: self.update_progress(p, mode), 
+                lambda s, o: self.conversion_completed(s, o, mode)
+            )
+            
+        elif mode == "web":
+            url = self.web_url_var.get()
+            if not url:
+                messagebox.showerror("Error", "Por favor ingrese una URL para convertir")
+                return
+            
+            # Preparar la ruta de salida temporal
+            from urllib.parse import urlparse
+            parsed_url = urlparse(url)
+            domain = parsed_url.netloc.replace("www.", "")
+            path = parsed_url.path.strip("/").replace("/", "_")
+            if not path:
+                path = "index"
+            output_filename = f"{domain}_{path}.md"
+            self.output_file_path = str(self.temp_dir / output_filename)
+            
+            # Actualizar la interfaz
+            self.conversion_in_progress = True
+            self.web_convert_button.config(state=tk.DISABLED)
+            self.web_cancel_button.config(state=tk.NORMAL)
+            self.web_download_button.config(state=tk.DISABLED)
+            self.web_progress_var.set(0)
+            self.web_status_var.set("Iniciando conversión...")
+            
+            # Iniciar la conversión en un hilo separado
+            self.web_converter.convert_url_async(
+                url, 
+                self.output_file_path, 
+                lambda p: self.update_progress(p, mode), 
+                lambda s, o: self.conversion_completed(s, o, mode)
+            )
+            
+        elif mode == "youtube":
+            url = self.yt_url_var.get()
+            if not url:
+                messagebox.showerror("Error", "Por favor ingrese una URL de YouTube para convertir")
+                return
+            
+            # Verificar que sea una URL de YouTube
+            if "youtube.com" not in url and "youtu.be" not in url:
+                messagebox.showerror("Error", "La URL no parece ser de YouTube")
+                return
+            
+            # Preparar la ruta de salida temporal
+            from urllib.parse import urlparse
+            parsed_url = urlparse(url)
+            video_id = parsed_url.query.split('v=')[-1].split('&')[0] if 'v=' in parsed_url.query else parsed_url.path.split('/')[-1]
+            output_filename = f"youtube_{video_id}.md"
+            self.output_file_path = str(self.temp_dir / output_filename)
+            
+            # Actualizar la interfaz
+            self.conversion_in_progress = True
+            self.yt_convert_button.config(state=tk.DISABLED)
+            self.yt_cancel_button.config(state=tk.NORMAL)
+            self.yt_download_button.config(state=tk.DISABLED)
+            self.yt_progress_var.set(0)
+            self.yt_status_var.set("Iniciando conversión...")
+            
+            # Iniciar la conversión en un hilo separado
+            self.web_converter.convert_url_async(
+                url, 
+                self.output_file_path, 
+                lambda p: self.update_progress(p, mode), 
+                lambda s, o: self.conversion_completed(s, o, mode)
+            )
+    
+    def update_progress(self, progress, mode="file"):
+        """Actualiza el progreso en la interfaz"""
+        if mode == "file":
+            self.progress_var.set(progress)
+            if progress < 100:
+                self.status_var.set(f"Convirtiendo... {progress:.1f}%")
+            else:
+                self.status_var.set("Conversión completada")
+        elif mode == "web":
+            self.web_progress_var.set(progress)
+            if progress < 100:
+                self.web_status_var.set(f"Convirtiendo... {progress:.1f}%")
+            else:
+                self.web_status_var.set("Conversión completada")
+        elif mode == "youtube":
+            self.yt_progress_var.set(progress)
+            if progress < 100:
+                self.yt_status_var.set(f"Convirtiendo... {progress:.1f}%")
+            else:
+                self.yt_status_var.set("Conversión completada")
+    
+    def conversion_completed(self, success, output_path, mode="file"):
+        """Maneja la finalización de la conversión"""
+        self.conversion_in_progress = False
+        
+        if mode == "file":
+            self.convert_button.config(state=tk.NORMAL)
+            self.cancel_button.config(state=tk.DISABLED)
+            
+            if success:
+                self.download_button.config(state=tk.NORMAL)
+                self.status_var.set("Conversión completada con éxito")
+                messagebox.showinfo("Éxito", "Documento convertido exitosamente")
+            else:
+                self.status_var.set("Error en la conversión")
+                self.progress_var.set(0)
+                messagebox.showerror("Error", "No se pudo completar la conversión")
+                
+        elif mode == "web":
+            self.web_convert_button.config(state=tk.NORMAL)
+            self.web_cancel_button.config(state=tk.DISABLED)
+            
+            if success:
+                self.web_download_button.config(state=tk.NORMAL)
+                self.web_status_var.set("Conversión completada con éxito")
+                messagebox.showinfo("Éxito", "Página web convertida exitosamente")
+            else:
+                self.web_status_var.set("Error en la conversión")
+                self.web_progress_var.set(0)
+                messagebox.showerror("Error", "No se pudo completar la conversión")
+                
+        elif mode == "youtube":
+            self.yt_convert_button.config(state=tk.NORMAL)
+            self.yt_cancel_button.config(state=tk.DISABLED)
+            
+            if success:
+                self.yt_download_button.config(state=tk.NORMAL)
+                self.yt_status_var.set("Conversión completada con éxito")
+                messagebox.showinfo("Éxito", "Video de YouTube convertido exitosamente")
+            else:
+                self.yt_status_var.set("Error en la conversión")
+                self.yt_progress_var.set(0)
+                messagebox.showerror("Error", "No se pudo completar la conversión")
+    
+    def cancel_conversion(self, mode="file"):
+        """Cancela la conversión en curso"""
+        if not self.conversion_in_progress:
+            return
+        
+        if mode == "file":
             self.converter.cancel_conversion()
             self.status_var.set("Conversión cancelada")
-            self.progress_var.set(0)
             self.conversion_in_progress = False
             self.convert_button.config(state=tk.NORMAL)
             self.cancel_button.config(state=tk.DISABLED)
+        elif mode == "web":
+            self.web_converter.cancel_conversion()
+            self.web_status_var.set("Conversión cancelada")
+            self.conversion_in_progress = False
+            self.web_convert_button.config(state=tk.NORMAL)
+            self.web_cancel_button.config(state=tk.DISABLED)
+        elif mode == "youtube":
+            self.web_converter.cancel_conversion()
+            self.yt_status_var.set("Conversión cancelada")
+            self.conversion_in_progress = False
+            self.yt_convert_button.config(state=tk.NORMAL)
+            self.yt_cancel_button.config(state=tk.DISABLED)
     
-    def download_file(self):
-        if not self.output_file or not Path(self.output_file).exists():
+    def download_file(self, mode="file"):
+        """Permite al usuario descargar el archivo convertido"""
+        if not self.output_file_path or not Path(self.output_file_path).exists():
             messagebox.showerror("Error", "No hay archivo para descargar")
             return
         
         # Solicitar ubicación para guardar
         save_path = filedialog.asksaveasfilename(
-            title="Guardar archivo Markdown",
             defaultextension=".md",
             filetypes=[("Markdown", "*.md"), ("Todos los archivos", "*.*")],
-            initialfile=Path(self.output_file).name
+            initialfile=Path(self.output_file_path).name
         )
         
-        if save_path:
-            try:
-                shutil.copy2(self.output_file, save_path)
+        if not save_path:
+            return
+        
+        try:
+            # Copiar el archivo
+            shutil.copy2(self.output_file_path, save_path)
+            
+            # Actualizar estado según el modo
+            if mode == "file":
                 self.status_var.set(f"Archivo guardado en: {save_path}")
-                messagebox.showinfo("Éxito", f"Archivo guardado exitosamente en:\n{save_path}")
-            except Exception as e:
-                messagebox.showerror("Error", f"Error al guardar el archivo: {str(e)}")
+            elif mode == "web":
+                self.web_status_var.set(f"Archivo guardado en: {save_path}")
+            elif mode == "youtube":
+                self.yt_status_var.set(f"Archivo guardado en: {save_path}")
+                
+            messagebox.showinfo("Éxito", f"Archivo guardado en:\n{save_path}")
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo guardar el archivo: {str(e)}")
+            logging.error(f"Error al guardar el archivo: {e}")
 
 def main():
     """Función principal que inicia la aplicación GUI"""
